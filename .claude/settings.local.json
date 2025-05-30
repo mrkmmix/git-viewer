@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm create vue:*)",
+      "Bash(npm install:*)",
+      "Bash(mkdir:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": false
+}
