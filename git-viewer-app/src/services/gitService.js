@@ -13,6 +13,35 @@ class GitService {
     // Each cache is a *plain object*; isomorphic‑git stores symbol‑keyed
     // fields on it, which aren’t visible via Object.keys().
     this._statusCaches = new Map() // Map<repoName, Object>
+    this.githubToken = null // GitHub authentication token
+    this.corsProxy = 'http://localhost:9999' // Local CORS proxy
+  }
+
+  setGitHubAuth(token) {
+    this.githubToken = token
+  }
+
+  getHttpOptions() {
+    const options = {
+      corsProxy: this.corsProxy
+    }
+    
+    if (this.githubToken) {
+      // For GitHub Personal Access Tokens, use onAuth callback
+      options.onAuth = () => ({
+        username: 'mrkmmix',
+        password: this.githubToken,
+      })
+      console.log('GitService: Using GitHub token for authentication via onAuth', {
+        corsProxy: this.corsProxy,
+        hasToken: !!this.githubToken,
+        tokenPrefix: this.githubToken?.substring(0, 10) + '...'
+      })
+    } else {
+      console.log('GitService: No GitHub token available')
+    }
+    
+    return options
   }
 
   extractRepoName(url) {
@@ -30,6 +59,7 @@ class GitService {
       await this.browserFS.ensureInitialized()
       
       // Clone the repository with progress callback
+      const httpOptions = this.getHttpOptions()
       await git.clone({
         fs: this.browserFS.getRawFS(),
         http,
@@ -37,7 +67,7 @@ class GitService {
         url,
         singleBranch: true,
         depth: 50, // Get recent commits for history
-        corsProxy: 'https://cors.isomorphic-git.org',
+        ...httpOptions,
         onProgress: onProgress ? (progressEvent) => {
           onProgress({
             phase: progressEvent.phase,
@@ -416,20 +446,83 @@ class GitService {
     try {
       await fs.ensureInitialized()
       
-      if (onMessage) onMessage('git push origin main')
+      // Detect current branch
+      const currentBranch = await git.currentBranch({
+        fs: fs.getRawFS(),
+        dir,
+        fullname: false
+      })
+      
+      if (!currentBranch) {
+        throw new Error('No current branch found. Make sure you have commits in the repository.')
+      }
+      
+      if (onMessage) onMessage(`git push origin ${currentBranch}`)
+      const httpOptions = this.getHttpOptions()
       await git.push({
         fs: fs.getRawFS(),
         http,
         dir,
         remote: 'origin',
-        ref: 'main', // or detect current branch
-        corsProxy: 'https://cors.isomorphic-git.org',
+        ref: currentBranch,
+        ...httpOptions,
         onMessage: onMessage || undefined
       })
       console.log(`git push completed`)
     } catch (error) {
       console.error('Push failed:', error)
       throw new Error(`Failed to push changes: ${error.message}`)
+    }
+  }
+
+  async fetchChanges(repoName, onMessage = null) {
+    const fs = this.getFileSystemForRepo(repoName)
+    const dir = this.getRepoPath(repoName)
+    
+    try {
+      await fs.ensureInitialized()
+      
+      // Check if directory exists and is accessible
+      try {
+        await fs.stat(dir)
+      } catch (dirError) {
+        throw new Error(`Repository directory not found: ${dir}. Error: ${dirError.message}`)
+      }
+      
+      // Check if .git directory exists
+      try {
+        const gitDir = fs.joinPath ? fs.joinPath(dir, '.git') : `${dir}/.git`
+        await fs.stat(gitDir)
+      } catch (gitError) {
+        throw new Error(`Not a git repository: ${dir}. Missing .git directory.`)
+      }
+      
+      // Detect current branch
+      const currentBranch = await git.currentBranch({
+        fs: fs.getRawFS(),
+        dir,
+        fullname: false
+      })
+      
+      if (!currentBranch) {
+        throw new Error('No current branch found. Make sure you have commits in the repository.')
+      }
+      
+      if (onMessage) onMessage(`git fetch origin ${currentBranch}`)
+      const httpOptions = this.getHttpOptions()
+      await git.fetch({
+        fs: fs.getRawFS(),
+        http,
+        dir: './',
+        remote: 'origin',
+        ref: currentBranch,
+        ...httpOptions,
+        onMessage: onMessage || undefined
+      })
+      console.log(`git fetch completed`)
+    } catch (error) {
+      console.error('Fetch failed:', error)
+      throw new Error(`Failed to fetch changes: ${error.message}`)
     }
   }
 

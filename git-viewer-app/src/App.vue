@@ -6,9 +6,20 @@
         <div class="p-3">
           <div class="d-flex justify-content-between align-items-center mb-3">
             <h5 class="mb-0">Git Viewer</h5>
-            <button @click="toggleTheme" class="btn btn-outline-secondary btn-sm">
-              <i :class="isDarkTheme ? 'bi bi-sun' : 'bi bi-moon'"></i>
-            </button>
+            <div class="d-flex gap-2">
+              <button @click="toggleGitHubAuth" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-github"></i>
+                {{ isGitHubAuthenticated ? 'Sign Out' : 'Sign In' }}
+              </button>
+              <button @click="toggleTheme" class="btn btn-outline-secondary btn-sm">
+                <i :class="isDarkTheme ? 'bi bi-sun' : 'bi bi-moon'"></i>
+              </button>
+            </div>
+          </div>
+          
+          <!-- GitHub Auth Status -->
+          <div v-if="isGitHubAuthenticated" class="alert alert-success mb-3 py-2">
+            <small><i class="bi bi-check-circle"></i> Signed in to GitHub</small>
           </div>
           
           <!-- Repository Management -->
@@ -55,11 +66,14 @@
           <div class="mb-3" v-if="selectedRepo">
             <label class="form-label">Git Commands</label>
             <div class="d-grid gap-2">
+              <button @click="fetchChanges" class="btn btn-outline-info btn-sm">
+                <i class="bi bi-download"></i> Fetch
+              </button>
               <button @click="commitChanges" class="btn btn-outline-success btn-sm">
-                Commit Changes
+                <i class="bi bi-check-circle"></i> Commit Changes
               </button>
               <button @click="pushChanges" class="btn btn-outline-warning btn-sm">
-                Push
+                <i class="bi bi-upload"></i> Push
               </button>
             </div>
           </div>
@@ -203,6 +217,13 @@
         </div>
       </div>
     </div>
+
+    <!-- GitHub Authentication Modal -->
+    <GitHubAuthModal 
+      :show="showAuthModal" 
+      @authenticate="handleGitHubAuth"
+      @cancel="showAuthModal = false"
+    />
   </div>
 </template>
 
@@ -214,6 +235,7 @@ import '@xterm/xterm/css/xterm.css'
 import FileTree from './components/FileTree.vue'
 import FileEditor from './components/FileEditor.vue'
 import CommitList from './components/CommitList.vue'
+import GitHubAuthModal from './components/GitHubAuthModal.vue'
 import { gitService } from './services/gitService.js'
 
 export default {
@@ -221,7 +243,8 @@ export default {
   components: {
     FileTree,
     FileEditor,
-    CommitList
+    CommitList,
+    GitHubAuthModal
   },
   setup() {
     const repoUrl = ref('')
@@ -238,6 +261,9 @@ export default {
     const commitFiles = ref([])
     const fsRemoteConnected = ref(false)
     const fsRemoteError = ref('')
+    const isGitHubAuthenticated = ref(false)
+    const gitHubToken = ref('')
+    const showAuthModal = ref(false)
     const cloneProgress = ref({
       phase: '',
       percentage: 0,
@@ -566,9 +592,50 @@ export default {
       }
     }
 
+    const fetchChanges = async () => {
+      if (!selectedRepo.value) return
+      
+      isLoading.value = true
+      loadingMessage.value = 'Fetching changes...'
+      
+      try {
+        await gitService.fetchChanges(selectedRepo.value, onGitMessage)
+        alert('Changes fetched successfully!')
+      } catch (error) {
+        alert('Error fetching changes: ' + error.message)
+      } finally {
+        isLoading.value = false
+      }
+    }
+
     const toggleTheme = () => {
       isDarkTheme.value = !isDarkTheme.value
       localStorage.setItem('darkTheme', isDarkTheme.value)
+    }
+
+    const toggleGitHubAuth = () => {
+      if (isGitHubAuthenticated.value) {
+        // Sign out
+        gitHubToken.value = ''
+        isGitHubAuthenticated.value = false
+        localStorage.removeItem('githubToken')
+        
+        // Update git service to remove auth
+        gitService.setGitHubAuth(null)
+      } else {
+        // Show sign in modal
+        showAuthModal.value = true
+      }
+    }
+
+    const handleGitHubAuth = (token) => {
+      gitHubToken.value = token
+      isGitHubAuthenticated.value = true
+      localStorage.setItem('githubToken', token)
+      showAuthModal.value = false
+      
+      // Update git service with auth
+      gitService.setGitHubAuth(token)
     }
 
     const selectCommit = async (commit) => {
@@ -632,11 +699,17 @@ export default {
     // Provide dark theme state to child components
     provide('isDarkTheme', isDarkTheme)
 
-    // Load theme from localStorage
+    // Load theme and GitHub token from localStorage
     onMounted(async () => {
       const savedTheme = localStorage.getItem('darkTheme')
       isDarkTheme.value = savedTheme === 'true'
-      console.log('Dark theme loaded:', isDarkTheme.value);
+      
+      const savedToken = localStorage.getItem('githubToken')
+      if (savedToken) {
+        gitHubToken.value = savedToken
+        isGitHubAuthenticated.value = true
+        gitService.setGitHubAuth(savedToken)
+      }
       
       // Initialize terminal
       setTimeout(() => {
@@ -662,6 +735,8 @@ export default {
       commitFiles,
       fsRemoteConnected,
       fsRemoteError,
+      isGitHubAuthenticated,
+      showAuthModal,
       cloneProgress,
       terminalContainer,
       terminalPanel,
@@ -674,7 +749,10 @@ export default {
       updateFileContent,
       commitChanges,
       pushChanges,
+      fetchChanges,
       toggleTheme,
+      toggleGitHubAuth,
+      handleGitHubAuth,
       selectCommit,
       openLocalRepository
     }
