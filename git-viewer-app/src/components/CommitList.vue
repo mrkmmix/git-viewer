@@ -1,6 +1,5 @@
 <template>
   <div class="h-100 d-flex flex-column">
-    <h6 class="px-3 pt-3 mb-2">Commits</h6>
     
     <div v-if="isLoading" class="d-flex justify-content-center p-3">
       <div class="spinner-border spinner-border-sm" role="status"></div>

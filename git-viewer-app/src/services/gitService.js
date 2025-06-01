@@ -1,12 +1,18 @@
 import git from 'isomorphic-git'
 import http from 'isomorphic-git/http/web'
-import LightningFS from '@isomorphic-git/lightning-fs'
+import FSAbstraction, { FS_TYPES } from './fsAbstraction.js'
 
 class GitService {
   constructor() {
-    this.fs = new LightningFS('fs')
-    this.pfs = this.fs.promises // promisified fs
+    // Default to browser filesystem
+    this.browserFS = new FSAbstraction(FS_TYPES.BROWSER)
+    this.localFS = null // Will be initialized when needed
     this.repositories = new Map() // Store repo metadata in memory
+    this.currentFS = this.browserFS // Current active filesystem
+    // One status‑matrix cache *per* repository so paths don’t clash.
+    // Each cache is a *plain object*; isomorphic‑git stores symbol‑keyed
+    // fields on it, which aren’t visible via Object.keys().
+    this._statusCaches = new Map() // Map<repoName, Object>
   }
 
   extractRepoName(url) {
@@ -14,20 +20,33 @@ class GitService {
     return match ? match[1] : 'repository'
   }
 
-  async cloneRepository(url) {
+  async cloneRepository(url, onProgress = null, onMessage = null) {
     const repoName = this.extractRepoName(url)
     const dir = `/${repoName}`
     
     try {
-      // Clone the repository
+      console.log(`git clone ${url}`)
+      // Use browser filesystem for cloned repos
+      await this.browserFS.ensureInitialized()
+      
+      // Clone the repository with progress callback
       await git.clone({
-        fs: this.fs,
+        fs: this.browserFS.getRawFS(),
         http,
         dir,
         url,
         singleBranch: true,
         depth: 50, // Get recent commits for history
-        corsProxy: 'https://cors.isomorphic-git.org'
+        corsProxy: 'https://cors.isomorphic-git.org',
+        onProgress: onProgress ? (progressEvent) => {
+          onProgress({
+            phase: progressEvent.phase,
+            loaded: progressEvent.loaded,
+            total: progressEvent.total,
+            percentage: progressEvent.total > 0 ? Math.floor(100 * progressEvent.loaded / progressEvent.total) : 0
+          })
+        } : undefined,
+        onMessage: onMessage || undefined
       })
 
       // Store repository metadata in memory
@@ -35,9 +54,12 @@ class GitService {
         name: repoName,
         url,
         clonedAt: new Date().toISOString(),
-        branch: 'main'
+        branch: 'main',
+        type: 'browser',
+        fsType: FS_TYPES.BROWSER
       })
 
+      console.log(`git clone completed: ${repoName}`)
       return repoName
     } catch (error) {
       console.error('Clone failed:', error)
@@ -45,23 +67,105 @@ class GitService {
     }
   }
 
-  async getRepositories() {
-    // Check Lightning FS for existing repositories
-    const repos = []
+  async openLocalRepository(directoryHandle) {
     try {
-      const entries = await this.pfs.readdir('/')
+      // Create filesystem with directory handle
+      const localFS = new FSAbstraction(FS_TYPES.LOCAL, { directoryHandle })
+      await localFS.ensureInitialized()
+
+      // Check if the directory is a git repository
+      const isGitRepo = await localFS.isGitRepository('.')
+      if (!isGitRepo) {
+        throw new Error('Selected directory is not a git repository')
+      }
+
+      // Create a unique name for the local repo
+      const repoName = `local-${directoryHandle.name}`
+      
+      // Store the filesystem instance
+      this.localFS = localFS
+      
+      // Store repository metadata
+      this.repositories.set(repoName, {
+        name: repoName,
+        displayName: `[local] ${directoryHandle.name}`,
+        path: '.',
+        directoryHandle,
+        type: 'local',
+        fsType: FS_TYPES.LOCAL,
+        clonedAt: new Date().toISOString()
+      })
+
+      return repoName
+    } catch (error) {
+      console.error('Error opening local repository:', error)
+      throw new Error(`Failed to open local repository: ${error.message}`)
+    }
+  }
+
+  async testLocalFSConnection() {
+    try {
+      if (!this.localFS) {
+        return { 
+          connected: false, 
+          error: 'No local repository open',
+          suggestion: 'Please open a local repository first.'
+        }
+      }
+      return await this.localFS.testConnection()
+    } catch (error) {
+      return { 
+        connected: false, 
+        error: error.message,
+        suggestion: 'Directory access may have been revoked. Please select the directory again.'
+      }
+    }
+  }
+
+  // Helper method to get the appropriate filesystem for a repository
+  getFileSystemForRepo(repoName) {
+    const repoData = this.repositories.get(repoName)
+    if (repoData && repoData.fsType === FS_TYPES.LOCAL) {
+      // Create a new filesystem instance for this specific repository
+      if (repoData.directoryHandle) {
+        return new FSAbstraction(FS_TYPES.LOCAL, { directoryHandle: repoData.directoryHandle })
+      }
+      return this.localFS // fallback
+    }
+    return this.browserFS
+  }
+
+  // Helper method to get the directory path for a repository
+  getRepoPath(repoName) {
+    const repoData = this.repositories.get(repoName)
+    if (repoData && repoData.fsType === FS_TYPES.LOCAL) {
+      return repoData.path
+    }
+    return `/${repoName}`
+  }
+
+  async getRepositories() {
+    const repos = []
+    
+    // Get browser-based repositories from Lightning FS
+    try {
+      await this.browserFS.ensureInitialized()
+      const entries = await this.browserFS.readdir('/')
       for (const entry of entries) {
         try {
-          const stat = await this.pfs.stat(`/${entry}`)
+          const stat = await this.browserFS.stat(`/${entry}`)
           if (stat.isDirectory()) {
             // Check if it's a git repository
             try {
-              
-              await this.pfs.stat(`/${entry}/.git`)
+              await this.browserFS.stat(`/${entry}/.git`)
+              const repoData = this.repositories.get(entry)
               repos.push({
                 name: entry,
-                url: this.repositories.get(entry)?.url || 'unknown',
-                clonedAt: this.repositories.get(entry)?.clonedAt || 'unknown'
+                displayName: `[browser] ${entry}`,
+                url: repoData?.url || 'unknown',
+                clonedAt: repoData?.clonedAt || 'unknown',
+                type: 'browser',
+                fsType: FS_TYPES.BROWSER
               })
             } catch {
               // Not a git repository, skip
@@ -72,15 +176,33 @@ class GitService {
         }
       }
     } catch (error) {
-      console.error('Error getting repositories:', error)
+      console.error('Error getting browser repositories:', error)
     }
+
+    // Add local repositories from memory
+    for (const [repoName, repoData] of this.repositories) {
+      if (repoData.type === 'local') {
+        repos.push({
+          name: repoName,
+          displayName: repoData.displayName,
+          path: repoData.path,
+          clonedAt: repoData.clonedAt,
+          type: 'local',
+          fsType: FS_TYPES.LOCAL
+        })
+      }
+    }
+    
     return repos
   }
 
   async getFileTree(repoName) {
-    const dir = `/${repoName}`
+    const fs = this.getFileSystemForRepo(repoName)
+    const dir = this.getRepoPath(repoName)
+    
     try {
-      const files = await this.getAllFiles(dir)
+      await fs.ensureInitialized()
+      const files = await this.getAllFiles(repoName, dir, fs)
       const tree = []
       
       // Create a set to track directories we've already added
@@ -124,19 +246,29 @@ class GitService {
     }
   }
 
-  async getAllFiles(dir, currentPath = '') {
+  async getAllFiles(repoName, dir, fs, currentPath = '') {
     const files = []
     try {
-      const entries = await this.pfs.readdir(currentPath ? `${dir}/${currentPath}` : dir)
+      const readPath = currentPath ? `${dir}/${currentPath}` : dir
+      const entries = await fs.readdir(readPath)
       
       for (const entry of entries) {
         if (entry === '.git') continue // Skip .git directory
         
         const fullPath = currentPath ? `${currentPath}/${entry}` : entry
-        const stat = await this.pfs.stat(`${dir}/${fullPath}`)
+        
+        // Construct the stat path properly
+        let statPath
+        if (dir === '.') {
+          statPath = fullPath
+        } else {
+          statPath = `${dir}/${fullPath}`
+        }
+        
+        const stat = await fs.stat(statPath)
         
         if (stat.isDirectory()) {
-          const subFiles = await this.getAllFiles(dir, fullPath)
+          const subFiles = await this.getAllFiles(repoName, dir, fs, fullPath)
           files.push(...subFiles)
         } else {
           files.push(fullPath)
@@ -151,8 +283,12 @@ class GitService {
 
   async readFile(repoName, filePath) {
     try {
-      const fullPath = `/${repoName}/${filePath}`
-      const content = await this.pfs.readFile(fullPath, 'utf8')
+      const fs = this.getFileSystemForRepo(repoName)
+      const dir = this.getRepoPath(repoName)
+      await fs.ensureInitialized()
+      
+      const fullPath = `${dir}/${filePath}`
+      const content = await fs.readFile(fullPath, 'utf8')
       return content
     } catch (error) {
       console.error('Error reading file:', error)
@@ -162,41 +298,103 @@ class GitService {
 
   async writeFile(repoName, filePath, content) {
     try {
-      const dir = `/${repoName}`
-      const fullPath = `${dir}/${filePath}`
+      const fs = this.getFileSystemForRepo(repoName)
+      const dir = this.getRepoPath(repoName)
+      await fs.ensureInitialized()
       
-      // Ensure directory exists
-      const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'))
-      try {
-        await this.pfs.mkdir(dirPath, { recursive: true })
-      } catch (error) {
-        // Directory might already exist
+      // For local repositories, use simple path, for browser repos use full path
+      const repoData = this.repositories.get(repoName)
+      let fullPath
+      if (repoData && repoData.fsType === FS_TYPES.LOCAL) {
+        fullPath = filePath // Local repos use relative paths
+      } else {
+        fullPath = `${dir}/${filePath}` // Browser repos use full paths
       }
       
-      await this.pfs.writeFile(fullPath, content, 'utf8')
+      // Ensure directory exists for browser repos
+      if (repoData && repoData.fsType !== FS_TYPES.LOCAL) {
+        const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'))
+        try {
+          await fs.mkdir(dirPath, { recursive: true })
+        } catch (error) {
+          // Directory might already exist
+        }
+      }
+      
+      await fs.writeFile(fullPath, content, 'utf8')
+      console.log(`File saved: ${fullPath}`)
     } catch (error) {
       console.error('Error writing file:', error)
       throw new Error(`Failed to write file: ${error.message}`)
     }
   }
 
-  async commitChanges(repoName, message) {
-    const dir = `/${repoName}`
+  async commitChanges(repoName, message, onMessage = null) {
+    const fs = this.getFileSystemForRepo(repoName)
+    // -------------------------------------------------------------------
+    // Pick (or create) the cache dedicated to this repository
+    let repoCache = this._statusCaches.get(repoName)
+    if (!repoCache) {
+      repoCache = {}            // plain object works best with isomorphic‑git
+      this._statusCaches.set(repoName, repoCache)
+    }
+    const dir = this.getRepoPath(repoName)
     
     try {
-      // Add all files to git index
-      const files = await this.getAllFiles(dir)
-      for (const filePath of files) {
+      await fs.ensureInitialized()
+      
+      // Batch stage changed paths more efficiently
+      // -------------------------------------------------------------------
+      // 1. Build the status matrix once, re‑using a cache to avoid
+      //    re‑stat'ing unchanged paths on subsequent commits.
+      const FILE = 0, HEAD = 1, WORKDIR = 2, STAGE = 3
+      const matrix = await git.statusMatrix({
+        fs: fs.getRawFS(),
+        dir,
+        cache: repoCache,
+        ignored: false, // Include ignored files
+      })
+      
+      const toAdd = []
+      const toRemove = []
+      
+      for (const row of matrix) {
+        const [filepath, head, workdir] = row
+        if (head === workdir) continue        // unmodified
+                
+        if (workdir === 0) {
+          // deleted in workdir
+          toRemove.push(filepath)
+          if (onMessage) onMessage(`  deleted: ${filepath}`)
+        } else {
+          // new or modified
+          toAdd.push(filepath)
+          if (onMessage) onMessage(`  added/modified: ${filepath}`)
+        }
+      }
+      
+      // 2. Stage all additions / deletions in *one* call each.
+      if (toAdd.length) {
         await git.add({
-          fs: this.fs,
+          fs: fs.getRawFS(),
           dir,
-          filepath: filePath
+          filepath: toAdd,
+          parallel: true                   // use parallel mode for speed
+        })
+      }
+      if (toRemove.length) {
+        await git.remove({
+          fs: fs.getRawFS(),
+          dir,
+          filepath: toRemove,
+          parallel: true
         })
       }
 
+      if (onMessage) onMessage(`git commit -m "${message}"`)
       // Create commit
       await git.commit({
-        fs: this.fs,
+        fs: fs.getRawFS(),
         dir,
         author: {
           name: 'Git Viewer User',
@@ -204,24 +402,31 @@ class GitService {
         },
         message
       })
+      console.log(`git commit completed`)
     } catch (error) {
       console.error('Commit failed:', error)
       throw new Error(`Failed to commit changes: ${error.message}`)
     }
   }
 
-  async pushChanges(repoName) {
-    const dir = `/${repoName}`
+  async pushChanges(repoName, onMessage = null) {
+    const fs = this.getFileSystemForRepo(repoName)
+    const dir = this.getRepoPath(repoName)
     
     try {
+      await fs.ensureInitialized()
+      
+      if (onMessage) onMessage('git push origin main')
       await git.push({
-        fs: this.fs,
+        fs: fs.getRawFS(),
         http,
         dir,
         remote: 'origin',
         ref: 'main', // or detect current branch
-        corsProxy: 'https://cors.isomorphic-git.org'
+        corsProxy: 'https://cors.isomorphic-git.org',
+        onMessage: onMessage || undefined
       })
+      console.log(`git push completed`)
     } catch (error) {
       console.error('Push failed:', error)
       throw new Error(`Failed to push changes: ${error.message}`)
@@ -229,12 +434,15 @@ class GitService {
   }
 
   async getCommits(repoName, maxCount = 50) {
-    const dir = `/${repoName}`
+    const fs = this.getFileSystemForRepo(repoName)
+    const dir = this.getRepoPath(repoName)
     
     try {
+      await fs.ensureInitialized()
+      
       // Get only commit metadata from what's already available (no additional fetch)
       const commits = await git.log({
-        fs: this.fs,
+        fs: fs.getRawFS(),
         dir,
         depth: maxCount
       })
@@ -252,95 +460,85 @@ class GitService {
         }
       }))
     } catch (error) {
-      console.error('Error getting commits:', error)
+      console.error(`Error getting commits for ${repoName}:`, error)
       throw new Error(`Failed to get commits: ${error.message}`)
     }
   }
 
   async getCommitFiles(repoName, commitOid) {
-    const dir = `/${repoName}`
+    const fs = this.getFileSystemForRepo(repoName)
+    const dir = this.getRepoPath(repoName)
     
     try {
-      // Get the tree for this commit
+      await fs.ensureInitialized()
+      
       const { commit } = await git.readCommit({
-        fs: this.fs,
+        fs: fs.getRawFS(),
         dir,
         oid: commitOid
       })
       
-      // If this is the first commit, return all files
+      // If this is the first commit, return all files in that commit
       if (commit.parent.length === 0) {
-        return await this.getAllFiles(dir)
+        const changes = []
+        await this.walkCommitTree(fs.getRawFS(), dir, commit.tree, '', changes)
+        return changes
       }
       
-      // Compare with parent commit to get changed files
+      // Use git walk to efficiently compare with parent
       const parentOid = commit.parent[0]
       const changes = []
       
-      // Get all files from both commits
-      const currentFiles = await this.getCommitTree(dir, commitOid)
-      const parentFiles = await this.getCommitTree(dir, parentOid)
-      
-      // Find differences
-      const allPaths = new Set([...Object.keys(currentFiles), ...Object.keys(parentFiles)])
-      
-      for (const path of allPaths) {
-        if (!parentFiles[path]) {
-          changes.push(path) // Added file
-        } else if (!currentFiles[path]) {
-          changes.push(path) // Deleted file
-        } else if (currentFiles[path] !== parentFiles[path]) {
-          changes.push(path) // Modified file
+      await git.walk({
+        fs: fs.getRawFS(),
+        dir,
+        trees: [git.TREE({ ref: commitOid }), git.TREE({ ref: parentOid })],
+        map: async function(filepath, [A, B]) {
+          // Skip directories
+          if (filepath === '.') return
+          
+          // Get file info
+          const aType = await A?.type()
+          const bType = await B?.type()
+          
+          // Only process files, not directories
+          if (aType === 'tree' || bType === 'tree') return
+          
+          const aOid = await A?.oid()
+          const bOid = await B?.oid()
+          
+          // File was added, deleted, or modified
+          if (aOid !== bOid) {
+            changes.push(filepath)
+          }
         }
-      }
+      })
       
       return changes
     } catch (error) {
       console.error('Error getting commit files:', error)
-      // Fallback: return empty array
       return []
     }
   }
 
-  async getCommitTree(dir, commitOid) {
+  // Helper method to walk tree for first commit
+  async walkCommitTree(fs, dir, treeOid, prefix, files) {
     try {
-      const { commit } = await git.readCommit({
-        fs: this.fs,
-        dir,
-        oid: commitOid
-      })
+      const tree = await git.readTree({ fs, dir, oid: treeOid })
       
-      const tree = await git.readTree({
-        fs: this.fs,
-        dir,
-        oid: commit.tree
-      })
-      
-      const files = {}
-      
-      const processTree = async (tree, prefix = '') => {
-        for (const entry of tree.tree) {
-          const path = prefix + entry.path
-          if (entry.type === 'blob') {
-            files[path] = entry.oid
-          } else if (entry.type === 'tree') {
-            const subtree = await git.readTree({
-              fs: this.fs,
-              dir,
-              oid: entry.oid
-            })
-            await processTree(subtree, path + '/')
-          }
+      for (const entry of tree.tree) {
+        const path = prefix + entry.path
+        if (entry.type === 'blob') {
+          files.push(path)
+        } else if (entry.type === 'tree') {
+          await this.walkCommitTree(fs, dir, entry.oid, path + '/', files)
         }
       }
-      
-      await processTree(tree)
-      return files
     } catch (error) {
-      console.error('Error reading commit tree:', error)
-      return {}
+      console.error('Error walking commit tree:', error)
     }
   }
+
 }
 
 export const gitService = new GitService()

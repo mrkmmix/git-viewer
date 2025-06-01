@@ -6,14 +6,18 @@ import { Buffer } from 'buffer'
 export default defineConfig({
   plugins: [
     vue(),
-    // ESM build (Vite 5+)
+    // ESM build (Vite 5+)
     monaco({
-      languageWorkers: ['editorWorkerService','json','css','html','typescript','csharp','cpp','python']
+      languageWorkers: ['editorWorkerService','json','css','html','typescript']
     })
   ],
 
+  define: {
+    global: 'globalThis'
+  },
+
   optimizeDeps: {
-    exclude: ['monaco-editor']        // critical: don’t pre-bundle
+    exclude: ['monaco-editor']
   },
 
   build: {

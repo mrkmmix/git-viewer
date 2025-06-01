@@ -83,8 +83,7 @@ export default {
     
     const toggleFolder = (path) => {
       console.log('Toggling folder:', path)
-      console.log('Current expanded:', Array.from(expandedFolders.value))
-      
+     
       if (expandedFolders.value.has(path)) {
         expandedFolders.value.delete(path)
       } else {
@@ -92,8 +91,6 @@ export default {
       }
       // Force reactivity
       expandedFolders.value = new Set(expandedFolders.value)
-      
-      console.log('After toggle:', Array.from(expandedFolders.value))
     }
     
     const expandAll = () => {
@@ -207,8 +204,20 @@ export default {
 }
 
 :global(.dark-theme) .tree-controls {
-  background-color: #2d2d2d;
+  background-color: #252526 !important;
   border-color: #404040;
+}
+
+:global(.dark-theme) .tree-controls .btn-outline-secondary {
+  background-color: #404040;
+  border-color: #6c757d;
+  color: #e0e0e0;
+}
+
+:global(.dark-theme) .tree-controls .btn-outline-secondary:hover {
+  background-color: #505357;
+  border-color: #6c757d;
+  color: #fff;
 }
 
 .file-tree {
@@ -234,12 +243,12 @@ export default {
 }
 
 .file-item.selected {
-  background-color: #007bff;
+  background-color: #0078d4;
   color: white;
 }
 
 .file-item.selected:hover {
-  background-color: #0056b3;
+  background-color: #106ebe;
 }
 
 /* Dark theme styles */
@@ -252,13 +261,13 @@ export default {
 }
 
 :global(.dark-theme) .file-item.selected {
-  background-color: #0d6efd;
+  background-color: #fd0d31;
   color: white;
   font-weight: bold;
 }
 
 :global(.dark-theme) .file-item.selected:hover {
-  background-color: #0b5ed7;
+  background-color: #05152d;
 }
 
 .folder-toggle {

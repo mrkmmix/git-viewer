@@ -1,16 +1,22 @@
 <template>
   <div class="file-editor h-100 d-flex flex-column">
-    <div class="toolbar border-bottom p-2">
-      <button 
-        @click="saveFile" 
-        class="btn btn-sm btn-primary"
-        :disabled="!hasUnsavedChanges"
-      >
-        Save
-      </button>
-      <span v-if="hasUnsavedChanges" class="text-warning ms-2">
-        <i class="bi bi-circle-fill"></i> Unsaved changes
-      </span>
+    <div class="toolbar border-bottom p-2 d-flex justify-content-between align-items-center">
+      <div class="file-path">
+        <i class="bi bi-file-text me-1"></i>
+        <span class="fw-bold">{{ filePath }}</span>
+      </div>
+      <div class="toolbar-actions">
+        <span v-if="hasUnsavedChanges" class="text-warning me-2">
+          <i class="bi bi-circle-fill"></i> Unsaved changes
+        </span>
+        <button 
+          @click="saveFile" 
+          class="btn btn-sm btn-primary"
+          :disabled="!hasUnsavedChanges"
+        >
+          Save
+        </button>
+      </div>
     </div>
     
     <div ref="editorContainer" class="editor-container flex-grow-1"></div>
@@ -199,7 +205,7 @@ export default {
 }
 
 :global(.dark-theme) .toolbar {
-  background-color: #2d2d2d;
+  background-color: #252526;
   border-color: #404040;
 }
 </style>
